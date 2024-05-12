@@ -12,6 +12,13 @@
 # The function treats files as binary streams, so it's agnostic to the actual content of the file. 
 # It simply reads the file in chunks and writes those chunks to separate files, regardless of the file type.
 
+
+
+
+Automate it for N files
+Add documentation
+
+
 import os
 
 def split_into_chunks(filename, chunk_size, output_directory):
