@@ -3,6 +3,10 @@
 #
 # Here's how it would work with different types of files:
 #
+
+# Check all these
+
+
 # Text Files: Common text files like .txt, .csv, .json, etc.
 # Image Files: Formats like .jpg, .png, .gif, etc.
 # Video Files: Formats like .mp4, .avi, .mov, etc.
