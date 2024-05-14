@@ -1,1 +1,1 @@
-# A fully decentralized file sharing network in Python
+# A fully distributed and decentralized file sharing network in Python
