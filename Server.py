@@ -25,6 +25,10 @@ def scan_network():
             for ip in devices.keys():
                 get_files_info(ip)
 
+            print("Discovered devices:")
+            for device in devices.keys():
+                print(f" - {device}")
+
             time.sleep(30)
         except KeyboardInterrupt:
             break
@@ -109,6 +113,7 @@ def FileDetails():
         json.dump(existing_info, f, indent=4)
 
 def SendChunks(client_socket, filename, chunknumbers):
+    print(f"Starting transfer of chunks {chunknumbers} for file {filename}")
     for chunk_number in chunknumbers:
         chunk_filename = f"chunk{chunk_number}_of_{len(chunknumbers)}"
         chunk_path = os.path.join(Directories["Path"], chunk_filename)
@@ -120,6 +125,7 @@ def SendChunks(client_socket, filename, chunknumbers):
             client_socket.sendall(b"-------")
         else:
             print(f"Chunk {chunk_number} does not exist.")
+    print(f"Completed transfer of chunks {chunknumbers} for file {filename}")
 
 def HandleCommand(client_socket):
     commands = []
