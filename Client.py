@@ -34,12 +34,13 @@ def GetFile(filename):
 
     sorted_devices = sorted(devices_with_chunks, key=lambda x: x[1], reverse=True)
 
+    print(f"Starting transfer for file {filename}")
     for server in sorted_devices:
         ip, chunk_indices = server[0], relevant_devices[server[0]]["chunks"]
         done = FetchFile(ip, filename, chunk_indices)
 
         if done:
-            print("File Fetched")
+            print(f"File {filename} fetched successfully")
             break
 
     if not done:
