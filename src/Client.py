@@ -1,113 +1,116 @@
-
-import os
-import re
-import json
 import socket
+import threading
+import datetime
+import os
+import json
+import re
 
 Config = {
-    "FilesPath": "Files",
     "Devices": "devices.json",
-    "AbortedTransfer": "aborts.json",
-    "TransferLog": "transfers.json",
-    "MetaData": "details.json",
-    "HeartbeatPort": 5000,
-    "Port": 1234,
-    "HeartbeatInterval": 15,
-    "MetadataClock": 25,
-    "BackupCheck": 15
+    "AbortedTransfer": "aborted_transfer.json",
+    "TransferLog": "transfer_log.json",
+    "MetaData": "metadata.json"
 }
 
-def ensure_files_exist():
+def _files_exist():
     for file in [Config["Devices"], Config["AbortedTransfer"], Config["TransferLog"], Config["MetaData"]]:
         if not os.path.isfile(file):
             with open(file, 'w') as f:
                 json.dump({}, f)
 
-def receive_file(server_socket, file_name, chunks, max_chunks):
-    directory_path = os.path.join(Config["FilesPath"], file_name)
-    if not os.path.isdir(directory_path):
-        os.makedirs(directory_path)
-    while True:
-        chunk_data = server_socket.recv(1024)
-        if not chunk_data:
-            break
-        for chunk_index in chunks:
-            chunk_file_path = os.path.join(directory_path, f"chunk{chunk_index}_of_{max_chunks}")
-            with open(chunk_file_path, "wb") as chunk_file:
-                chunk_file.write(chunk_data)
-            break
+def file_metadata(directory):
+    metadata = {}
+    for root, _, files in os.walk(directory):
+        for filename in files:
+            if "chunk" in filename:
+                chunks = set()
+                max_chunk_number = 0
+                pattern = re.compile(r'chunk(\d+)_of_(\d+)')
+                match = pattern.search(filename)
+                if match:
+                    chunk_number = int(match.group(1))
+                    total_chunks = int(match.group(2))
+                    chunks.add(chunk_number)
+                    max_chunk_number = max(max_chunk_number, chunk_number)
+                metadata[filename] = {
+                    "chunks": sorted(chunks),
+                    "max_chunk_number": max_chunk_number,
+                    "total_chunks": total_chunks
+                }
+    return metadata
 
-def fetch_file_chunks(filename):
-    ip_chunks_map = get_file_chunks_details(filename)
-    if not ip_chunks_map:
-        print(f"No chunk details found for file {filename} in {Config['MetaData']}")
-        return
-    file_directory = os.path.join(Config["FilesPath"], filename)
-    if not os.path.exists(file_directory):
-        os.makedirs(file_directory)
-    existing_chunks = set()
-    if os.path.isdir(file_directory):
-        for chunk_filename in os.listdir(file_directory):
-            chunk_match = re.match(r'chunk(\d+)_of_\d+', chunk_filename)
-            if chunk_match:
-                existing_chunks.add(int(chunk_match.group(1)))
-    total_chunks = 0
-    for ip, chunks in ip_chunks_map.items():
-        total_chunks = max(total_chunks, max(chunks))
-    for ip, chunks in sorted(ip_chunks_map.items(), key=lambda item: len(item[1]), reverse=True):
-        for chunk_index in chunks:
-            if chunk_index in existing_chunks:
-                continue
-            try:
-                with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-                    s.connect((ip, Config["Port"]))
-                    request = f"Fetch:{filename}:{chunk_index}"
-                    s.send(request.encode())
-                    chunk_file_path = os.path.join(file_directory, f"chunk{chunk_index}_of_{total_chunks}")
-                    with open(chunk_file_path, "wb") as chunk_file:
-                        while True:
-                            chunk_data = s.recv(4096)
-                            if not chunk_data:
-                                break
-                            chunk_file.write(chunk_data)
-                    existing_chunks.add(chunk_index)
-                    print(f"Chunk {chunk_index} fetched from {ip}")
-                    if len(existing_chunks) == total_chunks:
-                        print(f"All chunks for {filename} have been fetched.")
-                        return
-            except (ConnectionRefusedError, socket.timeout):
-                print(f"Failed to connect to {ip} to fetch chunk {chunk_index}.")
-                continue
-    if len(existing_chunks) < total_chunks:
-        print(f"Unable to fetch all chunks for {filename}. Missing chunks: {set(range(1, total_chunks + 1)) - existing_chunks}")
+def send_file_metadata(client_socket, directory):
+    metadata = file_metadata(directory)
+    metadata_json = json.dumps(metadata)
+    client_socket.send(metadata_json.encode())
 
-def get_file_chunks_details(filename):
-    if not os.path.isfile(Config["MetaData"]):
-        return {}
-    with open(Config["MetaData"], 'r') as f:
-        metadata = json.load(f)
-    file_chunks = {}
-    for ip, files in metadata.items():
-        if filename in files:
-            file_chunks[ip] = files[filename]["chunks"]
-    return file_chunks
+def send_file_chunk(client_socket, filename, chunk_number):
+    chunk_filename = f"{filename}_chunk{chunk_number}_of_{chunk_number}"
+    if os.path.isfile(chunk_filename):
+        with open(chunk_filename, 'rb') as f:
+            chunk_data = f.read()
+        client_socket.sendall(chunk_data)
+    else:
+        client_socket.sendall(b'')
 
-def connect_to_server(server_ip, request):
-    try:
-        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-            s.connect((server_ip, Config["Port"]))
-            s.send(request.encode())
-    except (ConnectionRefusedError, socket.timeout) as e:
-        print(f"Error occurred: {e}")
+def handle_echo(data, client_socket):
+    heartbeat_status(client_socket)
+    heartbeat = heartbeat_check(client_socket)
+    if heartbeat == 200:
+        return f"Echo: {data}"
+    else:
+        return "Heartbeat check failed"
 
-def main():
-    ensure_files_exist()
-    while True:
-        try:
-            filename = input("Enter the file name: ")
-            fetch_file_chunks(filename)
-        except Exception as e:
-            print(f"Error occurred: {e}")
+def handle_time(client_socket):
+    _files_exist()
+    send_file_metadata(client_socket, ".")
+    return f"Server time: {datetime.datetime.now()}"
+
+def handle_reverse(data):
+    return f"Reversed: {data[::-1]}"
+
+def heartbeat_check(client_socket):
+    heartbeat = int(client_socket.recv(1024).decode())
+    return heartbeat
+
+def heartbeat_status(client_socket):
+    heartbeat_signal = str(200)
+    client_socket.send(heartbeat_signal.encode())
+
+def client_handler(conn, addr):
+    print(f"Connected by {addr}")
+    with conn:
+        while True:
+            data = conn.recv(1024).decode()
+            if not data:
+                break
+
+            command, *params = data.split()
+            if command == "ECHO":
+                response = handle_echo(" ".join(params), conn)
+            elif command == "TIME":
+                response = handle_time(conn)
+            elif command == "REVERSE":
+                response = handle_reverse(" ".join(params))
+            elif command == "REQUEST_CHUNK":
+                filename, chunk_number = params
+                send_file_chunk(conn, filename, int(chunk_number))
+                continue  # No need to send a standard response for this command
+            else:
+                response = "Unknown command"
+
+            if command != "TIME" and command != "REQUEST_CHUNK":  # Send the response only for non-TIME and non-REQUEST_CHUNK commands
+                conn.sendall(response.encode())
+
+def start_server(host='127.0.0.1', port=65432):
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.bind((host, port))
+        s.listen()
+        print(f"Server listening on {host}:{port}")
+        while True:
+            conn, addr = s.accept()
+            thread = threading.Thread(target=client_handler, args=(conn, addr))
+            thread.start()
 
 if __name__ == "__main__":
-        main()
+    start_server()
