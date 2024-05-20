@@ -1,209 +1,161 @@
+
 import os
+import re
 import json
 import socket
 import threading
-import time
 
-Directories = {
-    "Path": "./Files",
-    "NetworkDevices": "network_devices.json",
-    "YellowBook": "yellowbook.json",
-    "HeartBeat_Port": 12345
+Config = {
+    "FilesPath": "Files",
+    "Devices": "devices.json",
+    "AbortedTransfer": "aborts.json",
+    "TransferLog": "transfers.json",
+    "MetaData": "details.json",
+    "HeartbeatPort": 5000,
+    "Port": 1234,
+    "HeartbeatInterval": 15,
+    "MetadataClock": 25,
+    "BackupCheck": 15
 }
 
-def scan_network():
-    devices = {}
-    while True:
-        try:
-            for ip in range(1, 256):
-                address = f"192.168.1.{ip}"
-                if address != "192.168.1.1" and is_port_open(address):
-                    devices[address] = {"Status": "1"}  # Alive
+def ensure_files_exist():
+    for file in [Config["Devices"], Config["AbortedTransfer"], Config["TransferLog"], Config["MetaData"]]:
+        if not os.path.isfile(file):
+            with open(file, 'w') as f:
+                json.dump({}, f)
 
-            DeviceLog(devices)
+def file_metadata(directory):
+    file_metadata = {}
+    for root, _, files in os.walk(directory):
+        for filename in files:
+            if "chunk" in filename:
+                chunks = set()
+                max_chunk_number = 0
+                pattern = re.compile(r'chunk(\d+)_of_(\d+)')
+                match = pattern.search(filename)
+                if match:
+                    chunk_number = int(match.group(1))
+                    total_chunks = int(match.group(2))
+                    chunks.add(chunk_number)
+                    max_chunk_number = max(max_chunk_number, chunk_number)
+                file_metadata[filename] = {
+                    "chunks": sorted(chunks),
+                    "max_chunk_number": max_chunk_number,
+                    "total_chunks": total_chunks
+                }
+    return file_metadata
 
-            for ip in devices.keys():
-                get_files_info(ip)
+def send_file_metadata(client_socket, directory):
+    file_metadata = file_metadata(directory)
+    metadata_json = json.dumps(file_metadata)
+    client_socket.send(metadata_json.encode())
 
-            print("Discovered devices:")
-            for device in devices.keys():
-                print(f" - {device}")
+def receive_file_metadata(server_socket, address):
+    metadata_json = server_socket.recv(4096).decode()
+    file_metadata = json.loads(metadata_json)
+    if os.path.isfile(Config["MetaData"]):
+        with open(Config["MetaData"], 'r') as f:
+            existing_metadata = json.load(f)
+    else:
+        existing_metadata = {}
+    existing_metadata[address[0]] = file_metadata
+    with open(Config["MetaData"], 'w') as f:
+        json.dump(existing_metadata, f)
 
-            time.sleep(30)
-        except KeyboardInterrupt:
-            break
+def send_file(client_socket, file_name, chunks):
+    file_path = os.path.join(Config["FilesPath"], file_name)
+    if os.path.isdir(file_path):
+        for chunk_index in chunks:
+            pattern = re.compile(rf"chunk{chunk_index}_of_\d+")
+            for filename in os.listdir(file_path):
+                if pattern.match(filename):
+                    chunk_file_path = os.path.join(file_path, filename)
+                    with open(chunk_file_path, "rb") as chunk_file:
+                        chunk_data = chunk_file.read()
+                        client_socket.send(chunk_data)
+                    break
+            else:
+                print(f"Chunk file for index {chunk_index} not found.")
+    else:
+        print(f"File {file_name} not found.")
 
-def is_port_open(ip):
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-        result = s.connect_ex((ip, Directories["HeartBeat_Port"]))
-        return result == 0
+def heartbeat_check(client_socket):
+    heartbeat = int(client_socket.recv(1024).decode())
+    return heartbeat
 
-def DeviceLog(devices):
-    if not os.path.exists(Directories["NetworkDevices"]):
-        with open(Directories["NetworkDevices"], 'w') as f:
-            json.dump({}, f)
+def heartbeat_status(client_socket):
+    heartbeat_signal = str(200)
+    client_socket.send(heartbeat_signal.encode())
 
-    with open(Directories["NetworkDevices"], 'w') as f:
-        json.dump(devices, f, indent=4)
+def handle_request(request, data):
+    if request == "Echo":
+        heartbeat_check(data)
+    else:
+        filename, chunks = extract_info(data)
+        if request == "Fetch":
+            send_file(data['client_socket'], filename, chunks)
 
-def get_files_info(ip):
+def extract_info(data):
+    filename, chunks_str = data.split(':', 1)
+    chunks = list(map(int, chunks_str.split(',')))
+    return filename, chunks
+
+def inject_info(filename, chunks):
+    return f"{filename}:{','.join(map(str, chunks))}"
+
+def existing_chunks(filename):
+    file_path = os.path.join(Config["FilesPath"], filename)
+    if os.path.isdir(file_path):
+        chunk_indices = []
+        for chunk_filename in os.listdir(file_path):
+            match = re.match(r'chunk(\d+)_of_\d+', chunk_filename)
+            if match:
+                chunk_indices.append(int(match.group(1)))
+        return chunk_indices if chunk_indices else [0]
+    else:
+        return [0]
+
+def handle_file(filename):
+    chunks = existing_chunks(filename)
+    file_details = inject_info(filename, chunks)
+    if isinstance(chunks, list) and len(chunks) == 1 and chunks[0] == 0:
+        handle_request("Fetch", file_details)
+    else:
+        handle_request("Fetch", file_details)
+
+def connect_client(client_socket, client_address):
+    print(f"Accepted connection from {client_address}")
     try:
-        client_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        client_socket.connect((ip, Directories["HeartBeat_Port"]))
-        client_socket.sendall(b"METADATA_REQUEST")
-        data = client_socket.recv(4096)
+        while True:
+            request_data = client_socket.recv(4096)
+            if not request_data:
+                break
+            request_str, data_str = request_data.decode().split(':', 1)
+            request = request_str.strip()
+            data = {"client_socket": client_socket, "data": data_str.strip()}
+            handle_request(request, data)
+    except ConnectionResetError:
+        print(f"Connection reset by {client_address}")
+    finally:
+        print(f"Closed connection from {client_address}")
         client_socket.close()
 
-        if data:
-            meta_data = json.loads(data.decode())
-            update_yellowbook(ip, meta_data)
-    except Exception as e:
-        print(f"Error retrieving file info from {ip}: {e}")
-
-def update_yellowbook(ip, meta_data):
-    if os.path.exists(Directories["YellowBook"]):
-        with open(Directories["YellowBook"], 'r') as f:
-            yellowbook = json.load(f)
-    else:
-        yellowbook = {}
-
-    yellowbook[ip] = meta_data
-
-    with open(Directories["YellowBook"], 'w') as f:
-        json.dump(yellowbook, f, indent=4)
-
-def MetaData():
-    try:
-        if not os.path.exists(Directories["Path"]):
-            print(f"Error: Directory {Directories['Path']} does not exist.")
-            return None
-
-        subdirectories = [name for name in os.listdir(Directories["Path"]) if os.path.isdir(os.path.join(Directories["Path"], name))]
-
-        directory_info = {}
-        for subdirectory_name in subdirectories:
-            subdirectory_path = os.path.join(Directories["Path"], subdirectory_name)
-            subdirectory_files = os.listdir(subdirectory_path)
-
-            file_name = subdirectory_name
-            max_chunks, available_chunks = ChunkInfo(subdirectory_files)
-
-            directory_info[file_name] = {
-                'max_chunks': max_chunks,
-                'available_chunks': available_chunks
-            }
-
-        return directory_info
-
-    except Exception as e:
-        print(f"Error: {e}")
-        return None
-
-def ChunkInfo(subdirectory_files):
-    max_chunks = 0
-    available_chunks = set()
-    for file_name in subdirectory_files:
-        parts = file_name.split('_')
-        if len(parts) >= 3 and parts[-2] == 'of':
-            try:
-                chunk_number = int(parts[-1])
-                max_chunks = max(max_chunks, chunk_number)
-                available_chunks.add(chunk_number)
-            except ValueError:
-                pass
-    return max_chunks, sorted(available_chunks)
-
-def FileDetails():
-    hostname = socket.gethostname()
-    LocalIP = socket.gethostbyname(hostname)
-
-    deviceIP = LocalIP
-
-    Info = MetaData()
-    if Info is None:
-        return
-
-    existing_info = {}
-
-    if os.path.exists(Directories["YellowBook"]):
-        with open(Directories["YellowBook"], 'r') as f:
-            existing_info = json.load(f)
-
-    existing_info[deviceIP] = Info
-
-    with open(Directories["YellowBook"], 'w') as f:
-        json.dump(existing_info, f, indent=4)
-
-def SendChunks(client_socket, filename, chunknumbers):
-    print(f"Starting transfer of chunks {chunknumbers} for file {filename}")
-    subdirectory_path = os.path.join(Directories["Path"], filename)
-
-    for chunk_number in chunknumbers:
-        chunk_filename = f"chunk_{chunk_number}_of_{len(chunknumbers)}"
-        chunk_path = os.path.join(subdirectory_path, chunk_filename)
-
-        if os.path.exists(chunk_path):
-            with open(chunk_path, 'rb') as chunk_file:
-                chunk_data = chunk_file.read()
-                client_socket.sendall(chunk_data)
-            client_socket.sendall(b"-------")
-        else:
-            print(f"Chunk {chunk_number} does not exist.")
-    print(f"Completed transfer of chunks {chunknumbers} for file {filename}")
-
-def HandleCommand(client_socket):
-    commands = []
-    while True:
-        try:
-            command = client_socket.recv(1024).decode().strip()
-            if command == "-------":
-                break
-            else:
-                commands.append(command)
-        except Exception as e:
-            print(f"Error receiving data: {e}")
-            return None
-
-    if commands:
-        if commands[0] == "METADATA_REQUEST":
-            meta_data = MetaData()
-            client_socket.sendall(json.dumps(meta_data).encode())
-        else:
-            filename = commands[0]
-            chunknumbers = json.loads(commands[1])
-            SendChunks(client_socket, filename, chunknumbers)
-
-def client_handler(client_socket, addr):
-    print(f"Connection from {addr}")
-    while True:
-        data = client_socket.recv(1024).decode()
-        if not data:
-            break
-        HandleCommand(client_socket)
-    client_socket.close()
-
-def start_server():
+def server():
+    ensure_files_exist()
     server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    server_socket.bind(('0.0.0.0', Directories["HeartBeat_Port"]))
+    server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    server_socket.bind(('0.0.0.0', Config["Port"]))
     server_socket.listen(5)
-    print("Server listening...")
-
+    print(f"Server listening on port {Config['Port']}")
     while True:
-        client_socket, addr = server_socket.accept()
-        client_thread = threading.Thread(target=client_handler, args=(client_socket, addr))
+        client_socket, client_address = server_socket.accept()
+        client_thread = threading.Thread(target=connect_client, args=(client_socket, client_address))
         client_thread.start()
 
-if __name__ == "__main__":
-    if not os.path.exists(Directories["YellowBook"]):
-        with open(Directories["YellowBook"], 'w') as f:
-            json.dump({}, f)
-
-    if not os.path.exists(Directories["NetworkDevices"]):
-        with open(Directories["NetworkDevices"], 'w') as f:
-            json.dump({}, f)
-
-    server_thread = threading.Thread(target=start_server)
+def main():
+    server_thread = threading.Thread(target=server)
     server_thread.start()
+    server_thread.join()
 
-    scan_thread = threading.Thread(target=scan_network)
-    scan_thread.start()
+if __name__ == "__main__":
+    main()
