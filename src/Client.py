@@ -1,8 +1,8 @@
 import json
+import os
 import socket
 import threading
 import time
-import os
 
 def read_json(file_path):
     with open(file_path, 'r') as file:
@@ -44,7 +44,6 @@ def attempt_connection(ip, data):
         time.sleep(15)  # Wait for 15 seconds before trying again
 
 def request_file_metadata(ip):
-    # Connect to server and request file metadata
     try:
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         sock.settimeout(5)
@@ -58,8 +57,6 @@ def request_file_metadata(ip):
         return {}
 
 def store_metadata(ip, metadata):
-    # Store the received metadata under the IP address
-    # You can implement your own logic to store the metadata, such as in a JSON file
     all_metadata = {}
     if os.path.exists("metadata.json"):
         with open("metadata.json", 'r') as file:
