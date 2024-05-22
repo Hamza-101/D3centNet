@@ -1,116 +1,109 @@
+import json
 import socket
 import threading
-import datetime
+import time
 import os
-import json
-import re
 
-Config = {
-    "Devices": "devices.json",
-    "AbortedTransfer": "aborted_transfer.json",
-    "TransferLog": "transfer_log.json",
-    "MetaData": "metadata.json"
-}
+def read_json(file_path):
+    with open(file_path, 'r') as file:
+        data = json.load(file)
+    return data
 
-def _files_exist():
-    for file in [Config["Devices"], Config["AbortedTransfer"], Config["TransferLog"], Config["MetaData"]]:
-        if not os.path.isfile(file):
-            with open(file, 'w') as f:
-                json.dump({}, f)
+def update_status(data, ip, status):
+    data[ip]['Status'] = status
 
-def file_metadata(directory):
-    metadata = {}
-    for root, _, files in os.walk(directory):
-        for filename in files:
-            if "chunk" in filename:
-                chunks = set()
-                max_chunk_number = 0
-                pattern = re.compile(r'chunk(\d+)_of_(\d+)')
-                match = pattern.search(filename)
-                if match:
-                    chunk_number = int(match.group(1))
-                    total_chunks = int(match.group(2))
-                    chunks.add(chunk_number)
-                    max_chunk_number = max(max_chunk_number, chunk_number)
-                metadata[filename] = {
-                    "chunks": sorted(chunks),
-                    "max_chunk_number": max_chunk_number,
-                    "total_chunks": total_chunks
-                }
-    return metadata
-
-def send_file_metadata(client_socket, directory):
-    metadata = file_metadata(directory)
-    metadata_json = json.dumps(metadata)
-    client_socket.send(metadata_json.encode())
-
-def send_file_chunk(client_socket, filename, chunk_number):
-    chunk_filename = f"{filename}_chunk{chunk_number}_of_{chunk_number}"
-    if os.path.isfile(chunk_filename):
-        with open(chunk_filename, 'rb') as f:
-            chunk_data = f.read()
-        client_socket.sendall(chunk_data)
-    else:
-        client_socket.sendall(b'')
-
-def handle_echo(data, client_socket):
-    heartbeat_status(client_socket)
-    heartbeat = heartbeat_check(client_socket)
-    if heartbeat == 200:
-        return f"Echo: {data}"
-    else:
-        return "Heartbeat check failed"
-
-def handle_time(client_socket):
-    _files_exist()
-    send_file_metadata(client_socket, ".")
-    return f"Server time: {datetime.datetime.now()}"
-
-def handle_reverse(data):
-    return f"Reversed: {data[::-1]}"
-
-def heartbeat_check(client_socket):
-    heartbeat = int(client_socket.recv(1024).decode())
-    return heartbeat
-
-def heartbeat_status(client_socket):
-    heartbeat_signal = str(200)
-    client_socket.send(heartbeat_signal.encode())
-
-def client_handler(conn, addr):
-    print(f"Connected by {addr}")
-    with conn:
+def handle_client(connection, address, data):
+    print(f"Connected to {address}")
+    try:
         while True:
-            data = conn.recv(1024).decode()
-            if not data:
+            data_received = connection.recv(1024)
+            if not data_received:
                 break
+            print(f"Received from {address}: {data_received.decode()}")
+            # Process received data here
+            # Example: Echo back the received data
+            connection.sendall(data_received)
+    except Exception as e:
+        print(f"Error with {address}: {e}")
+    finally:
+        print(f"Disconnected from {address}")
+        update_status(data, address, 0)  # Update status to disconnected (0)
 
-            command, *params = data.split()
-            if command == "ECHO":
-                response = handle_echo(" ".join(params), conn)
-            elif command == "TIME":
-                response = handle_time(conn)
-            elif command == "REVERSE":
-                response = handle_reverse(" ".join(params))
-            elif command == "REQUEST_CHUNK":
-                filename, chunk_number = params
-                send_file_chunk(conn, filename, int(chunk_number))
-                continue  # No need to send a standard response for this command
-            else:
-                response = "Unknown command"
+def attempt_connection(ip, data):
+    while True:
+        try:
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            sock.settimeout(10)  # Set a timeout for the connection attempt
+            sock.connect((ip, 12345))  # Assume port 12345 for connection
+            update_status(data, ip, 1)  # Update status to connected (1)
+            print(f"Successfully connected to {ip}")
+            handle_client(sock, ip, data)
+        except Exception as e:
+            print(f"Failed to connect to {ip}: {e}")
+            update_status(data, ip, 0)  # Update status to disconnected (0)
+        time.sleep(15)  # Wait for 15 seconds before trying again
 
-            if command != "TIME" and command != "REQUEST_CHUNK":  # Send the response only for non-TIME and non-REQUEST_CHUNK commands
-                conn.sendall(response.encode())
+def request_file_metadata(ip):
+    # Connect to server and request file metadata
+    try:
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.settimeout(5)
+        sock.connect((ip, 12345))  # Assume server listens on port 12345
+        sock.sendall(b"GET_METADATA")
+        response = sock.recv(1024)
+        metadata = json.loads(response.decode())
+        return metadata
+    except Exception as e:
+        print(f"Error requesting file metadata from {ip}: {e}")
+        return {}
 
-def start_server(host='127.0.0.1', port=65432):
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-        s.bind((host, port))
-        s.listen()
-        print(f"Server listening on {host}:{port}")
-        while True:
-            conn, addr = s.accept()
-            thread = threading.Thread(target=client_handler, args=(conn, addr))
+def store_metadata(ip, metadata):
+    # Store the received metadata under the IP address
+    # You can implement your own logic to store the metadata, such as in a JSON file
+    all_metadata = {}
+    if os.path.exists("metadata.json"):
+        with open("metadata.json", 'r') as file:
+            all_metadata = json.load(file)
+    all_metadata[ip] = metadata
+    with open("metadata.json", 'w') as file:
+        json.dump(all_metadata, file, indent=4)
+
+def start_connection_attempts(data):
+    for ip, status_info in data.items():
+        if status_info['Status'] == 1:
+            thread = threading.Thread(target=attempt_connection, args=(ip, data))
             thread.start()
 
+def handle_user_input(command, data):
+    if command == "check_status":
+        active_devices = [ip for ip, info in data.items() if info['Status'] == 1]
+        if active_devices:
+            print(f"Active devices: {', '.join(active_devices)}")
+        else:
+            print("Error 404: No device connected")
+    else:
+        print(f"Unknown command: {command}")
+
+def handle_cli_input(data):
+    while True:
+        user_input = input("Enter command: ")
+        handle_user_input(user_input, data)
+
+def save_json(file_path, data):
+    with open(file_path, 'w') as file:
+        json.dump(data, file, indent=4)
+
+def main(file_path):
+    data = read_json(file_path)
+    
+    connection_thread = threading.Thread(target=start_connection_attempts, args=(data,))
+    connection_thread.start()
+
+    cli_thread = threading.Thread(target=handle_cli_input, args=(data,))
+    cli_thread.start()
+
+    connection_thread.join()
+    cli_thread.join()
+
 if __name__ == "__main__":
-    start_server()
+    main('data.json')
