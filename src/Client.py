@@ -90,6 +90,14 @@ def save_json(file_path, data):
     with open(file_path, 'w') as file:
         json.dump(data, file, indent=4)
 
+def backup_data(data):
+    time.sleep(37)
+    local_files = os.listdir("your_directory_path_here")  # Get list of local files
+    for filename in local_files:
+        # Logic to check if at least two online devices don't have this chunk
+        # If conditions met, send the chunk to those devices
+        pass  # Implement the logic here
+
 def main(file_path):
     data = read_json(file_path)
     
@@ -99,8 +107,12 @@ def main(file_path):
     cli_thread = threading.Thread(target=handle_cli_input, args=(data,))
     cli_thread.start()
 
+    backup_thread = threading.Thread(target=backup_data, args=(data,))
+    backup_thread.start()
+
     connection_thread.join()
     cli_thread.join()
+    backup_thread.join()
 
 if __name__ == "__main__":
     main('data.json')
