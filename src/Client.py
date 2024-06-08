@@ -5,14 +5,19 @@ import threading
 from FindIPs import FindIPs
 import nmap
 import base64
-
+import re
 # Add to a file
 Config = {
     "Network" : "devices.json",
     "FileInfo" : "files.json",
     "FileDir" : "Files",
-    "CopyTimeout" : 15,     #Change if needed
-    "ConnTimeout": 5
+    "BackupTimeout" : 75,     #Change if needed
+    "ConnTimeout": 60,
+    "Heartbeat" : 45,     #Change if needed
+    "FetchInfoTimeout": 5, #Metadata
+    #Add IP
+    # See of more needed
+    "PORT" : 5000 
 }
 
 # Ensure the 'metadata.json' file exists
@@ -23,7 +28,6 @@ if not os.path.exists("devices.json"):
 if not os.path.exists("files.json"):
     with open("files.json", "w") as file:
         json.dump({}, file)
-
 
 def encode_data(data_string, string_name, chunks_number):
     """
@@ -75,17 +79,15 @@ def decode_data(encoded_string):
     
     return data_string, string_name, int(chunks_number)
 
-
 # Function to handle file request
 def TransferFile(device_socket, filename, chunks):
     encoded_string = encode_data("GET", filename, chunks)
     try:
-        device_socket.sendall(encoded_string.encode('utf-8'))
+        device_socket.sendall(encoded_string.encode())
         receive_file_chunks(device_socket, filename, chunks)
     except Exception as e:
         print(f"Error sending message to device: {e}")
         
-# Function to receive file chunks and save them
 
 def receive_file_chunks(device_socket, filename, chunks):
     """
@@ -98,20 +100,19 @@ def receive_file_chunks(device_socket, filename, chunks):
     """
     file_dir = Config["FileDir"]
     file_path = os.path.join(file_dir, filename)
-
     if not os.path.exists(file_dir):
         os.makedirs(file_dir)
 
     with open(file_path, 'wb') as f:
         for chunk_idx in chunks:
-            chunk_data = device_socket.recv(1024)  # Adjust buffer size as needed
+            chunk_data = device_socket.recv()  
             f.write(chunk_data)
             chunk_filename = f"chunk{chunk_idx}_of_{len(chunks)}"
             chunk_path = os.path.join(file_dir, chunk_filename)
             with open(chunk_path, 'wb') as chunk_file:
                 chunk_file.write(chunk_data)
-            print(f"Chunk {chunk_idx} of file '{filename}' received and saved.")
-            
+
+# Complete        
 def Heartbeat(ip, devices_file):
     """
     Pings a device to check if it's online using Nmap.
@@ -140,7 +141,7 @@ def Heartbeat(ip, devices_file):
         update_device_status(ip, 0, devices_file)  # Update device status to offline (0)
         return False
 
-def update_device_status(ip, status, devices_file):
+def update_device_status(ip, status):
     """
     Updates the status of a device in the devices file.
     
@@ -150,12 +151,12 @@ def update_device_status(ip, status, devices_file):
         devices_file (str): The path to the file containing device information.
     """
     try:
-        with open(devices_file, 'r') as file:
+        with open(Config["Network"], 'r') as file:
             devices = json.load(file)
         
         if ip in devices:
             devices[ip]['status'] = status
-            with open(devices_file, 'w') as file:
+            with open(Config["Network"], 'w') as file:
                 json.dump(devices, file, indent=4)
             print(f"Device status updated: IP {ip}, Status {status}")
         else:
@@ -164,21 +165,33 @@ def update_device_status(ip, status, devices_file):
     except Exception as e:
         print(f"Error updating device status: {e}")
 
-def Metadata(device_socket):
-        
-    encoded_string = encode_data("Get Status", "", 0)
+# Complete
+def Metadata():
+    people = []
+    
+    with open(Config["Network"], 'r') as file:
+        data = json.load(file)
 
-    device_socket.sendall(encoded_string.encode('utf-8'))
+    with open(Config["Network"], 'r') as file:
+        for device in data:
+            network_people = device.get("ip")
+            status = device.get("status")
+            if status == 1:
 
-    # Receive the response
-    response = device_socket.recv().decode()
-    handle_response(response)
+                people.append(network_people)
+    for peeps in people:
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.settimeout(10)  # Set a timeout for the connection attempt
+        sock.connect((peeps, 12345))  # Assume port 12345 for connection
+        print(f"FIle directories updated for {peeps}")
+        encoded_string = encode_data("Get Status", "", 0)
+        sock.sendall(encoded_string.encode('utf-8'))
+        response = sock.recv().decode()
+        handle_response(peeps, response)
+        sock.close()
 
-#Change name
-def handle_response(device_socket, metadata, devices_file):
-
-    ip = device_socket.getpeername()[0]
-
+# Complete
+def handle_response(ip, metadata):
     """
     Updates the devices.json file with file metadata.
     
@@ -188,12 +201,12 @@ def handle_response(device_socket, metadata, devices_file):
         devices_file (str): The path to the devices.json file.
     """
     try:
-        with open(devices_file, 'r') as file:
+        with open(Config["Network"], 'r') as file:
             devices = json.load(file)
         
         if ip in devices:
             devices[ip]['Files'] = metadata
-            with open(devices_file, 'w') as file:
+            with open(Config["Network"], 'w') as file:
                 json.dump(devices, file, indent=4)
             print(f"Updated devices.json with file metadata for {ip}")
         else:
@@ -202,21 +215,115 @@ def handle_response(device_socket, metadata, devices_file):
     except Exception as e:
         print(f"Error updating devices.json: {e}")
 
-def HandleInput(device_socket, APICall):
+def GetIp(filename):
+    """
+    Gets the keys from the "Network" section of the Config dictionary that have the specified filename in the "Files" section.
 
-    request, name, chunks = decode_data(APICall)
+    Args:
+        config (dict): The configuration dictionary containing the "Network" section.
+        filename (str): The filename to check for in the "Files" section.
 
-    if(request=="Get"):
-        TransferFile(device_socket, name, chunks)
+    Returns:
+        list: A list of keys (IP addresses) that have the specified filename in their "Files" section.
+    """
 
-    elif(request=="GetStatus"):
-        Heartbeat(device_socket, name)
-
-    elif(request=="FetchInfo"):
-        Metadata(device_socket, name)
+    with open(Config["Network"], 'r') as file:
+        data = json.load(file)
     
+    devices_with_filename_and_chunks = []
 
-# Function to read JSON data from a file
+    for device in data:
+        ip = device.get("ip")
+        status = device.get("status")
+        files = device.get("Files", {})
+        
+        if status == 1 and filename in files:
+            chunks = files[filename]["Chunks"]
+            devices_with_filename_and_chunks.append((ip, chunks))
+
+    sorted_devices = sorted(devices_with_filename_and_chunks, key=lambda x: len(x[1]), reverse=True)
+    
+    return sorted_devices
+
+def FindMissingChunks(name):
+    existing_chunks = []
+    path = os.path.exists(os.path.join(Config["Network"], name))
+    if (not path) or len(os.listdir(path)) == 0:
+        existing_chunks=None
+    else:
+        pattern = re.compile(r'chunk(\d+)_of_(\d+)')
+        for filename in os.listdir(Config["FileDir"]):
+            match = pattern.search(filename)
+            if match:
+                chunk_index = int(match.group(1))
+                existing_chunks.append(chunk_index)
+    return existing_chunks
+
+def GetMaxChunks(filename):
+    max_chunks = 0
+
+    with open(Config["FileInfo"], 'r') as file:
+        data = json.load(file)
+
+    max_chunks = data[filename].get("maxChunks", 0)
+    return max_chunks
+    
+def FetchChunksInfo(filename):
+    chunks = []
+
+    with open(Config["FileInfo"], 'r') as file:
+        data = json.load(file)
+
+    chunks = data[filename].get("AllChunks", 0)
+    return chunks
+
+def EnumFileChunks(filename):
+    chunk_pattern = re.compile(r'chunk(\d+)_of_(\d+)')
+    existing_chunks = set()
+    for file_name in os.listdir(os.path.join(Config["FileDir"], filename)):
+        match = chunk_pattern.search(file_name)
+        if match and match.group(0) == filename:
+            existing_chunks.add(int(match.group(1)))  # Add the chunk index to the set
+    return sorted(existing_chunks)  
+
+# Change Metadata
+def HandleInput(input):
+
+    chunks = []
+    sortedDevices = GetIp(input)
+    # deviceInit = sortedDevices[0]
+    # InitIP = deviceInit["ip"]
+    # # Connection
+     
+    ChunksNumber = GetMaxChunks(input)  
+    ExistingChunks = FindMissingChunks(input)  
+    if (ExistingChunks == None):
+        for i in range(0, ChunksNumber + 1):
+             chunks.append(i) 
+    else:
+        for i in range(0, ChunksNumber + 1):
+            if (i not in ExistingChunks):
+                chunks.append(i) 
+
+    for device in sortedDevices:
+        ip, _ = device
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.settimeout(10) 
+        sock.connect((ip, Config["PORT"]))
+        sock.connect((ip, 12345))  
+        TransferFile(sock, input, chunks)
+        sock.close()
+        
+        #Optimize
+    # NChunks = FetchChunksInfo(input)
+
+ 
+
+    #     if(set(ExistingChunks) != set(NChunks)):
+    #        break 
+    #     device_socket.close()       
+    
+# Complete
 def read_json(file_path):
     with open(file_path, 'r') as file:
         data = json.load(file)
@@ -227,62 +334,62 @@ def update_status(data, ip, status):
     data[ip]['status'] = status
     save_json("devices.json", data)
 
-def attempt_connection(ip, data, success_counter):
-    try:
-        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        sock.settimeout(10)  # Set a timeout for the connection attempt
-        sock.connect((ip, 12345))  # Assume port 12345 for connection
-        update_status(data, ip, 1)  # Update status to connected (1)
-        print(f"Successfully connected to {ip}")
-        success_counter.append(ip)  # Increment the counter for successful connections
-    except Exception as e:
-        print(f"Failed to connect to {ip}: {e}")
-        update_status(data, ip, 0)  # Update status to disconnected (0)
-
-def start_connection_attempts(data):
-    success_counter = []  # List to store successful connections
-    threads = []
-    for device in data:
-        ip = device['ip']
-        if device['status'] == 0:
-            thread = threading.Thread(target=attempt_connection, args=(ip, data, success_counter))
-            thread.start()
-            threads.append(thread)
-    for thread in threads:
-        thread.join()
-    return len(success_counter)  # Return the number of successful connections
-
 def save_json(file_path, data):
     with open(file_path, 'w') as file:
         json.dump(data, file, indent=4)
 
-def main(file_path):
-    data = read_json(file_path)
-    success_count = start_connection_attempts(data)
-    if success_count > 0:
-        print(f"Successfully connected to {success_count} devices.")
-    else:
-        print("No connections made.")
+# def attempt_connection(ip, data, success_counter):
+#     try:
+#         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+#         sock.settimeout(10)  # Set a timeout for the connection attempt
+#         sock.connect((ip, 12345))  # Assume port 12345 for connection
+#         update_status(data, ip, 1)  # Update status to connected (1)
+#         print(f"Successfully connected to {ip}")
+#         success_counter.append(ip)  # Increment the counter for successful connections
+#     except Exception as e:
+#         print(f"Failed to connect to {ip}: {e}")
+#         update_status(data, ip, 0)  # Update status to disconnected (0)
+
+# def start_connection_attempts(data):
+#     success_counter = []  # List to store successful connections
+#     threads = []
+#     for device in data:
+#         ip = device['ip']
+#         if device['status'] == 0:
+#             thread = threading.Thread(target=attempt_connection, 
+#                                         args=(ip, data, success_counter))
+#             thread.start()
+#             threads.append(thread)
+#     for thread in threads:
+#         thread.join()
+#     return len(success_counter)  # Return the number of successful connections
+
+# def main(file_path):
+#     data = read_json(file_path)
+#     success_count = start_connection_attempts(data)
+#     if success_count > 0:
+#         print(f"Successfully connected to {success_count} devices.")
+#     else:
+#         print("No connections made.")
 
 def process_input(user_input):
-    # This function will process the user input
-    # Replace this with your actual processing logic
-    print(f"Processing input: {user_input}")
+    print(f"Starting file transfer: {user_input}")
+    HandleInput(user_input)
+
+
+def delayed_find_ips():
+    time.sleep(30)
+    FindIPs()
 
 if __name__ == "__main__":
-    FindIPs()
-    main(Config['Network'])
+    threading.Thread(target=delayed_find_ips).start()
 
     while True:
         try:
-            # Get input from the user
             user_input = input("Enter something (type 'quit' to exit): ").strip()
-
-            # If the user types 'quit', exit the loop
             if user_input.lower() == 'quit':
                 print("Exiting...")
                 break
-
-            # Pass the input to the processing function
             process_input(user_input)
         except Exception as e:
+            print("Wrong input")
