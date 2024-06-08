@@ -3,41 +3,17 @@ import os
 import socket
 import threading
 import re
+import base64
 
-
+Config = {
+    "FileDir" : "Files",
+}
 
 # Function to read JSON data from a file
 def read_json(file_path):
     with open(file_path, 'r') as file:
         data = json.load(file)
     return data
-
-
-def encode_data(data_string, string_name, chunks_number):
-    """
-    Encodes a string, string name, and number of chunks together into a single encoded string.
-    
-    Args:
-        data_string (str): The string data to encode.
-        string_name (str): The name of the string.
-        chunks_number (int): The number of chunks.
-        
-    Returns:
-        str: The encoded string containing all the input data.
-    """
-    # Concatenate the data into a single string
-    combined_string = f"{data_string}|{string_name}|{chunks_number}"
-    
-    # Convert the combined string to bytes
-    combined_bytes = combined_string.encode('utf-8')
-    
-    # Encode the bytes using Base64
-    encoded_bytes = base64.b64encode(combined_bytes)
-    
-    # Convert the encoded bytes back to a string
-    encoded_string = encoded_bytes.decode('utf-8')
-    
-    return encoded_string
 
 # Decode what arrives
 def decode_data(encoded_string):
@@ -64,9 +40,10 @@ def decode_data(encoded_string):
     
     return data_string, string_name, int(chunks_number)
 
-def file_metadata(directory):
+#Metadata Generation
+def file_metadata():
     metadata = {}
-    for root, _, files in os.walk(directory):
+    for _, _, files in os.walk(Config["Files"]):
         for filename in files:
             if "chunk" in filename:
                 chunks = set()
@@ -74,18 +51,17 @@ def file_metadata(directory):
                 pattern = re.compile(r'chunk(\d+)_of_(\d+)')
                 match = pattern.search(filename)
                 if match:
+                    #Modify to return list
                     chunk_number = int(match.group(1))
                     total_chunks = int(match.group(2))
                     chunks.add(chunk_number)
                     max_chunk_number = max(max_chunk_number, chunk_number)
                 metadata[filename] = {
                     "chunks": sorted(chunks),
-                    "max_chunk_number": max_chunk_number,       #What to do
-                    "total_chunks": total_chunks
+                    "maxChunk": max_chunk_number,       #What to do
+                    "totalChunks": total_chunks        # See if change
                 }
     return metadata
-
-#Have metadata saved, then send
 
 # Example usage
 def handle_client(connection, address):
@@ -102,36 +78,26 @@ def handle_client(connection, address):
         connection.close()
         print(f"Disconnected from {address}")
 
-def Metadata(device_socket):
+def SendMetadata(device_socket):
         
-    encoded_string = encode_data("Get Status", "", 0)
-
-    device_socket.sendall(encoded_string.encode('utf-8'))
-
-    # Receive the response
-    response = device_socket.recv().decode()
-    handle_response(response)
+    device_socket.sendall(file_metadata().encode)
 
 
 def HandleInput(device_socket, APICall):
-
-    request, name, chunks = decode_data(APICall)
-
-    if(request=="Get"):
-        FetchFile(device_socket, name, chunks)
-
-    elif(request=="FetchInfo"):
-        Metadata(device_socket, name)
     
+    request, name, chunks = decode_data(APICall)
+    
+    FetchFile(device_socket, name, chunks)
+
+    if(request == "FetchInfo"):
+        SendMetadata(device_socket)
+
 def FetchFile(device_socket, filename, chunks):
-    encoded_string = encode_data("GET", filename, chunks)
     try:
-        device_socket.sendall(encoded_string.encode('utf-8'))
         send_file(device_socket, filename, chunks)
     except Exception as e:
-        print(f"Error sending message to device: {e}")
-     
-
+        print(f"Error sending file to device: {e}")
+        
 def send_file(device_socket, filename, chunks):
     """
     Sends file chunks for the given file and chunk indices to the device socket.
@@ -153,7 +119,6 @@ def send_file(device_socket, filename, chunks):
                     with open(chunk_path, 'rb') as chunk_file:
                         chunk_data = chunk_file.read()
                         device_socket.sendall(chunk_data)
-                        print(f"Chunk {chunk_idx} of file '{filename}' sent to device.")
                 else:
                     print(f"Chunk {chunk_idx} of file '{filename}' not found.")
     else:
@@ -187,7 +152,8 @@ def start_server():
     try:
         while True:
             client_socket, address = server_socket.accept()
-            client_thread = threading.Thread(target=handle_client, args=(client_socket, address))
+            client_thread = threading.Thread(target=handle_client,
+                                    args=(client_socket, address))
             client_thread.start()
     except KeyboardInterrupt:
         print("Server terminated.")
