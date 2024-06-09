@@ -75,8 +75,7 @@ def handle_client(connection, address):
     except Exception as e:
         print(f"Error with {address}: {e}")
     finally:
-        connection.close()
-        print(f"Disconnected from {address}")
+        print(f"Connection closed {address}")
 
 def SendMetadata(device_socket):
         
@@ -89,8 +88,11 @@ def HandleInput(device_socket, APICall):
     
     FetchFile(device_socket, name, chunks)
 
-    if(request == "FetchInfo"):
+    if(request == "Get Status"):
         SendMetadata(device_socket)
+
+    if(request == "GET"):
+        send_file(device_socket, name, chunks)
 
 def FetchFile(device_socket, filename, chunks):
     try:
@@ -125,7 +127,7 @@ def send_file(device_socket, filename, chunks):
         print(f"File '{filename}' not found.")
 
 
-def handle_client(client_socket, address):
+def handle_client(client_socket):
     while True:
         try:
             encoded_data = client_socket.recv()
@@ -133,17 +135,17 @@ def handle_client(client_socket, address):
                 break
 
             decoded_message = decode_data(encoded_data)
-            HandleInput(decoded_message)
+            HandleInput(decoded_message, client_socket)
 
         except Exception as e:
             print("Error occurred while handling client:", e)
             break
 
-    client_socket.close()
-
 # Function to continuously accept client connections
 # Main function
 def start_server():
+    SERVER_HOST = get_server_ip()
+    SERVER_PORT = 5000
     server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     server_socket.bind((SERVER_HOST, SERVER_PORT))
     server_socket.listen(5)
@@ -162,10 +164,7 @@ def get_server_ip():
     return socket.gethostbyname(socket.gethostname())
 
 def main():
-    start_server(SERVER_HOST, SERVER_PORT)
-
-SERVER_HOST = get_server_ip()
-SERVER_PORT = 5000
+    start_server()
 
 if __name__ == "__main__":
     main()
